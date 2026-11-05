@@ -1,5 +1,24 @@
 {
   "permissions": {
-    "defaultMode": "default"
+    "defaultMode": "default",
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(!.env.example)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/block_secrets.py"]
+          }
+        ]
+      }
+    ]
   }
 }
