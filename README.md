@@ -18,7 +18,7 @@ python -m http.server 8000      # index.html 을 더블클릭하면 안 됩니�
 2. vercel.com → Add New → Project → Import → Application Preset: Other → Deploy
 3. Settings → Environment Variables
      GEMINI_API_KEY = (aistudio.google.com 에서 받은 키)
-     GEMINI_MODEL   = (선택. 비우면 api/classify.py 의 기본값)
+     GEMINI_MODEL   = (선택. 비우면 api/classify.py 의 기본값 — 화면의 «AI 모델»에서도 골라 바꿀 수 있다)
    → 저장하고 다시 배포
 ```
 

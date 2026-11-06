@@ -1,12 +1,99 @@
 /* 고객 한마디 분류기 — 화면.
  *
  * 흐름: 문장 → 가림(mask.js, 브라우저 안) → AI(api/classify) → 실패하면 규칙(rules.js)
- * 채점: 정답 100건을 규칙으로, 또는 AI로(20건씩 다섯 번) 돌려 맞힌 비율을 잰다.
+ * 채점: 정답 100건을 규칙으로, 또는 AI로(BATCH 건씩 나눠) 돌려 맞힌 비율을 잰다.
  */
 (function () {
   "use strict";
   const $ = s => document.querySelector(s);
-  const S = { criteria: null, test: [], practice: [], aiResults: null };
+  const S = { criteria: null, test: [], practice: [], aiResults: null, serverDefault: null };
+
+  // 채점할 때 한 번에 보내는 문장 수. 서버는 최대 20개까지 받지만(MAX_TEXTS),
+  // 많이 묶을수록 응답이 늦어 서버의 60초 대기 한도를 넘기 쉽다.
+  const BATCH = 10;
+
+  // ── AI 모델 고르기 ──────────────────────────────────
+  // 출처: https://aistudio.google.com/docs/pricing (2026-11-06 확인)
+  //   «Free Tier»가 «Free of charge»인 글쓰기(텍스트) 모델 중 다섯.
+  //   음성·실시간(Live)·번역·받아쓰기·TTS·임베딩·로보틱스 모델은 뺐다.
+  //   다섯 모두 가격표에 Preview · 지원 중단 표시가 없다.
+  //   (표시가 붙어 빠진 것: gemini-3-flash-preview — Preview · «legacy»,
+  //    gemini-2.5-pro · gemini-2.5-flash — 지원 중단, 2026-12-01부터 다른 모델로 넘겨짐)
+  // 순서: 무료 한도(하루 요청 수)는 가격표에 모델별 숫자가 없다(«Rate limits are subject to change»만 있음).
+  //   아래 순서는 «가벼운(Lite) 모델일수록 한도가 넉넉할 것»이라는 **추정**이다. 근거 자료는 찾지 못했다.
+  //   실제 한도는 AI Studio 에 로그인해서 확인한다.
+  const MODELS = [
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.8-flash",
+  ];
+  const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._\-]{0,63}$/;   // 서버(api/classify.py)와 같은 규칙
+  const CUSTOM = "__custom";
+  const STORE_KEY = "classifier.model";
+
+  // localStorage 는 시크릿 창 등에서 막힐 수 있다 — 못 써도 앱은 그대로 돈다
+  function storeGet() {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch (e) { return null; }
+  }
+  function storeSet(v) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(v)); } catch (e) { /* 기억만 못 할 뿐 */ }
+  }
+
+  function chosenModel() {           // 요청에 넣을 값. «서버 기본값»이면 ""
+    const v = $("#model-select").value;
+    return v === CUSTOM ? $("#model-custom").value.trim() : v;
+  }
+
+  function showModelNow() {
+    const el = $("#model-now");
+    const m = chosenModel();
+    el.classList.remove("bad");
+    if (!m) {
+      const d = S.serverDefault;
+      el.textContent = "지금 호출: 서버 기본값" +
+        (d ? ` (${d})` : " (서버 함수가 없어 이름을 모릅니다 — 배포하면 보입니다)");
+    } else if (!MODEL_RE.test(m)) {
+      el.textContent = "모델 이름이 올바르지 않습니다 — 영문·숫자·. _ - 만, 64자까지";
+      el.classList.add("bad");
+    } else {
+      el.textContent = `지금 호출: ${m}`;
+    }
+  }
+
+  function onModelChange() {
+    const custom = $("#model-select").value === CUSTOM;
+    $("#model-custom").hidden = !custom;
+    storeSet({ choice: $("#model-select").value, custom: $("#model-custom").value });
+    showModelNow();
+  }
+
+  function setupModels() {
+    const sel = $("#model-select");
+    const opt = (value, label) => { const o = document.createElement("option"); o.value = value; o.textContent = label; return o; };
+    sel.append(opt("", "서버 기본값"), ...MODELS.map(m => opt(m, m)), opt(CUSTOM, "직접 입력…"));
+
+    const saved = storeGet();
+    if (saved && typeof saved.choice === "string") {
+      $("#model-custom").value = typeof saved.custom === "string" ? saved.custom : "";
+      if (saved.choice === "" || saved.choice === CUSTOM || MODELS.includes(saved.choice)) {
+        sel.value = saved.choice;
+      } else {                       // 목록에서 빠진 모델이면 직접 입력으로 살려 둔다
+        sel.value = CUSTOM; $("#model-custom").value = saved.choice;
+      }
+    }
+    $("#model-custom").hidden = sel.value !== CUSTOM;
+    sel.addEventListener("change", onModelChange);
+    $("#model-custom").addEventListener("input", onModelChange);
+    showModelNow();
+
+    // 서버 기본 모델 이름 — 서버 함수가 없으면(로컬) 모르는 채로 둔다
+    fetch("api/classify", { method: "GET" })
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => { if (j && typeof j.default === "string") { S.serverDefault = j.default; showModelNow(); } })
+      .catch(() => {});
+  }
 
   async function load() {
     const [c, t, p] = await Promise.all([
@@ -30,7 +117,7 @@
       const r = await fetch("api/classify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ texts: maskedTexts, criteria: S.criteria }),
+        body: JSON.stringify({ texts: maskedTexts, criteria: S.criteria, model: chosenModel() }),
       });
       if (!r.ok) return { results: null, reason: `서버 함수가 없습니다 (${r.status}) — 배포하면 생깁니다` };
       return await r.json();
@@ -116,17 +203,26 @@
     btn.disabled = true;
     const masked = S.test.map(r => Mask.mask(r.text).masked);
     const results = [];
-    for (let i = 0; i < masked.length; i += 20) {
+    let usedModel = "";
+    for (let i = 0; i < masked.length; i += BATCH) {
+      const part = masked.slice(i, i + BATCH);
       btn.textContent = `AI 채점 중… ${i}/${masked.length}`;
-      const r = await askAI(masked.slice(i, i + 20));
+      let r = await askAI(part);
+      if (!r.results && r.timeout) {      // 느려서 끊긴 것만, 그 묶음을 한 번 더
+        btn.textContent = `다시 시도… ${i}/${masked.length}`;
+        r = await askAI(part);
+      }
       if (!r.results) {
         $("#score-msg").hidden = false;
-        $("#score-msg").textContent = `AI로 채점하지 못했습니다 — ${r.reason}`;
+        $("#score-msg").textContent = `AI로 채점하지 못했습니다 — ${r.reason}` +
+          (r.timeout ? " (한 번 더 시도했지만 같았습니다)" : "");
         btn.disabled = false; btn.textContent = "AI로 채점";
         return;
       }
+      usedModel = usedModel || r.model || "";
       results.push(...r.results);
     }
+    $("#ai-col").textContent = usedModel ? `AI · ${usedModel}` : "AI";
     // 답을 못 받은 문장은 «오답»으로 센다 — 빠진 것을 빼고 세면 점수가 부풀려진다
     const miss = { category: "-", sentiment: "-", urgency: "-" };
     S.aiResults = results;
@@ -158,5 +254,6 @@
     $("#crit-urg").textContent = c.urgency.guide;
   }
 
+  setupModels();
   load();
 })();
